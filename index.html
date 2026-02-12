@@ -345,6 +345,9 @@
   // init
   resetGame();
 })();
+  // === Pointer events for Android / mobile ===
+canvas.addEventListener('pointerdown', onTap, { passive: false });
 </script>
 </body>
 </html>
+
