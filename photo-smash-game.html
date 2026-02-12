@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Photo Smash</title>
+  <style>
+    :root { --pad: 12px; }
+    html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; background:#0b0f14; color:#e9eef5; }
+    .wrap { display:flex; flex-direction:column; height:100%; }
+    header { padding: var(--pad); display:flex; gap:10px; flex-wrap:wrap; align-items:center; background:#0f1620; border-bottom:1px solid #1b2a3a;}
+    header .btn, header label.btn {
+      background:#1b2a3a; color:#e9eef5; border:1px solid #2a3d52;
+      padding:10px 12px; border-radius:12px; cursor:pointer; user-select:none;
+      display:inline-flex; align-items:center; gap:8px; font-weight:600;
+    }
+    header .btn:active { transform: scale(0.99); }
+    header input[type=file] { display:none; }
+    header .stat { margin-inline-start:auto; display:flex; gap:14px; align-items:center; font-weight:700; }
+    header .stat span { padding:8px 10px; border-radius:12px; background:#101a26; border:1px solid #1b2a3a; }
+    main { flex:1; display:grid; place-items:center; padding: var(--pad); }
+    canvas { width:min(96vw, 900px); height:auto; border-radius:18px; border:1px solid #1b2a3a; background:#0a0f14; touch-action: manipulation; }
+    .hint { padding: 10px 12px; color:#a8b6c8; font-size: 13px; text-align:center; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; }
+    .small { font-size:12px; color:#a8b6c8; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="row">
+      <label class="btn" for="pick">
+        📷 העלה/צלם תמונה
+        <input id="pick" type="file" accept="image/*" capture="environment" />
+      </label>
+      <button class="btn" id="startBtn">▶️ התחל</button>
+      <button class="btn" id="resetBtn">🔁 איפוס</button>
+    </div>
+
+    <div class="stat">
+      <span>⏱️ זמן: <b id="time">30</b></span>
+      <span>🎯 ניקוד: <b id="score">0</b></span>
+      <span>🔥 רצף: <b id="streak">0</b></span>
+    </div>
+  </header>
+
+  <main>
+    <div>
+      <canvas id="c" width="900" height="520"></canvas>
+      <div class="hint">
+        טוענים תמונה → לוחצים “התחל” → ואז “מחסלים” מטרות שמופיעות עליה בלחיצה/טאץ׳.
+        <div class="small">אין שום העלאה לשרת — הכל רץ מקומית בדפדפן שלך.</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+
+  const pick = document.getElementById('pick');
+  const startBtn = document.getElementById('startBtn');
+  const resetBtn = document.getElementById('resetBtn');
+
+  const timeEl = document.getElementById('time');
+  const scoreEl = document.getElementById('score');
+  const streakEl = document.getElementById('streak');
+
+  // Game state
+  let bgImg = null;
+  let bgFit = { x:0, y:0, w:canvas.width, h:canvas.height };
+
+  let running = false;
+  let score = 0;
+  let streak = 0;
+  let timeLeft = 30;
+  let timer = null;
+
+  const targets = [];
+  const TARGET_LIFE_MS = 900;     // How long target stays alive
+  const SPAWN_EVERY_MS = 650;     // Spawn frequency
+  let lastSpawn = 0;
+
+  // Helpers
+  function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+  function rand(min, max){ return min + Math.random() * (max - min); }
+
+  function fitImageContain(img) {
+    const cw = canvas.width, ch = canvas.height;
+    const iw = img.width, ih = img.height;
+    const s = Math.min(cw / iw, ch / ih);
+    const w = iw * s, h = ih * s;
+    const x = (cw - w) / 2, y = (ch - h) / 2;
+    bgFit = {x, y, w, h};
+  }
+
+  function drawBackground() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = '#0a0f14';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    if (!bgImg) {
+      // placeholder
+      ctx.fillStyle = '#a8b6c8';
+      ctx.font = '700 22px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('טען תמונה כדי להתחיל', canvas.width/2, canvas.height/2 - 10);
+      ctx.font = '400 14px system-ui';
+      ctx.fillText('כפתור "העלה/צלם תמונה" למעלה', canvas.width/2, canvas.height/2 + 18);
+      return;
+    }
+
+    // letterboxed background
+    ctx.drawImage(bgImg, bgFit.x, bgFit.y, bgFit.w, bgFit.h);
+
+    // soft vignette
+    const g = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 10, canvas.width/2, canvas.height/2, Math.max(canvas.width, canvas.height)/1.2);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+
+  function spawnTarget(now) {
+    // spawn within bg area so it appears on photo
+    const r = rand(26, 44);
+    const x = rand(bgFit.x + r, bgFit.x + bgFit.w - r);
+    const y = rand(bgFit.y + r, bgFit.y + bgFit.h - r);
+
+    targets.push({
+      x, y, r,
+      born: now,
+      life: TARGET_LIFE_MS,
+      hit: false
+    });
+  }
+
+  function drawTarget(t, now) {
+    const age = now - t.born;
+    const p = clamp(age / t.life, 0, 1);
+    const alpha = (1 - p) * 0.95;
+
+    // outer ring
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.r, 0, Math.PI*2);
+    ctx.stroke();
+
+    // inner pulse
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, t.r * (0.65 + 0.25*Math.sin((now/120))), 0, Math.PI*2);
+    ctx.stroke();
+
+    // crosshair
+    ctx.globalAlpha = alpha * 0.9;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(t.x - t.r*0.8, t.y);
+    ctx.lineTo(t.x + t.r*0.8, t.y);
+    ctx.moveTo(t.x, t.y - t.r*0.8);
+    ctx.lineTo(t.x, t.y + t.r*0.8);
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+  function popText(x, y, text) {
+    // simple floating text (no particles)
+    const start = performance.now();
+    const dur = 520;
+    function anim(now) {
+      const p = clamp((now - start) / dur, 0, 1);
+      drawFrame(now);
+      ctx.save();
+      ctx.globalAlpha = (1 - p);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '700 20px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText(text, x, y - p*26);
+      ctx.restore();
+      if (p < 1 && running) requestAnimationFrame(anim);
+    }
+    requestAnimationFrame(anim);
+  }
+
+  function updateHUD() {
+    timeEl.textContent = String(timeLeft);
+    scoreEl.textContent = String(score);
+    streakEl.textContent = String(streak);
+  }
+
+  function resetGame() {
+    running = false;
+    score = 0;
+    streak = 0;
+    timeLeft = 30;
+    targets.length = 0;
+    if (timer) clearInterval(timer);
+    timer = null;
+    updateHUD();
+    drawBackground();
+  }
+
+  function startGame() {
+    if (!bgImg) {
+      alert('קודם טען תמונה 🙂');
+      return;
+    }
+    resetGame();
+    running = true;
+    updateHUD();
+
+    timer = setInterval(() => {
+      timeLeft -= 1;
+      updateHUD();
+      if (timeLeft <= 0) {
+        running = false;
+        clearInterval(timer);
+        timer = null;
+        targets.length = 0;
+        drawFrame(performance.now());
+        setTimeout(() => alert(`סיום! ניקוד: ${score}`), 50);
+      }
+    }, 1000);
+
+    requestAnimationFrame(loop);
+  }
+
+  function drawFrame(now) {
+    drawBackground();
+
+    // remove expired
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const t = targets[i];
+      const alive = (now - t.born) < t.life && !t.hit;
+      if (!alive) targets.splice(i, 1);
+    }
+
+    // draw
+    for (const t of targets) drawTarget(t, now);
+
+    // top overlay instruction
+    if (!running) {
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = 'rgba(15,22,32,0.7)';
+      ctx.fillRect(14, 14, canvas.width - 28, 46);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#e9eef5';
+      ctx.font = '700 16px system-ui';
+      ctx.textAlign = 'center';
+      ctx.fillText('לחץ "התחל" ואז פגע במטרות שמופיעות על התמונה', canvas.width/2, 44);
+      ctx.restore();
+    }
+  }
+
+  function loop(now) {
+    if (!running) return;
+
+    if (!lastSpawn) lastSpawn = now;
+    if ((now - lastSpawn) >= SPAWN_EVERY_MS) {
+      // spawn 1–2 targets
+      spawnTarget(now);
+      if (Math.random() < 0.35) spawnTarget(now);
+      lastSpawn = now;
+    }
+
+    drawFrame(now);
+    requestAnimationFrame(loop);
+  }
+
+  function canvasPointFromEvent(ev) {
+    const rect = canvas.getBoundingClientRect();
+    const clientX = (ev.touches && ev.touches[0]) ? ev.touches[0].clientX : ev.clientX;
+    const clientY = (ev.touches && ev.touches[0]) ? ev.touches[0].clientY : ev.clientY;
+
+    const x = (clientX - rect.left) * (canvas.width / rect.width);
+    const y = (clientY - rect.top) * (canvas.height / rect.height);
+    return {x, y};
+  }
+
+  function hitTest(x, y) {
+    // prefer latest target
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const t = targets[i];
+      if (t.hit) continue;
+      const dx = x - t.x, dy = y - t.y;
+      if ((dx*dx + dy*dy) <= (t.r * t.r)) return t;
+    }
+    return null;
+  }
+
+  function onTap(ev) {
+    if (!running) return;
+    ev.preventDefault();
+
+    const {x, y} = canvasPointFromEvent(ev);
+    const t = hitTest(x, y);
+
+    if (t) {
+      t.hit = true;
+      streak += 1;
+      const bonus = Math.min(10, streak);
+      const gained = 10 + bonus; // base + streak bonus
+      score += gained;
+      updateHUD();
+      popText(x, y, `+${gained}`);
+    } else {
+      // miss breaks streak
+      streak = 0;
+      updateHUD();
+    }
+  }
+
+  // Load image
+  pick.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      bgImg = img;
+      fitImageContain(img);
+      resetGame();
+      URL.revokeObjectURL(url);
+    };
+    img.src = url;
+  });
+
+  startBtn.addEventListener('click', startGame);
+  resetBtn.addEventListener('click', resetGame);
+
+  canvas.addEventListener('click', onTap);
+  canvas.addEventListener('touchstart', onTap, { passive: false });
+
+  // init
+  resetGame();
+})();
+</script>
+</body>
+</html>
